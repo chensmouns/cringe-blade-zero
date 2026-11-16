@@ -5651,7 +5651,7 @@ bool CastMove(const Context& context,const std::string& package,const std::wstri
 // Each move visit owns an outgoing-path clock. It opens at the derivation point
 // (or natural end), then intervals and branch pauses count from their arrival.
 // Press history is used only for input consumption; buffering never ages a new
-// node. Every completed move refreshes its own idle reset window.
+// node. Continuation windows start at the derivation gate, not animation end.
 struct ComboRun {
     enum class Phase { Idle, Starting, Running };
     int32_t owner=-2;uint64_t generation=0;NpcCombo::Config config; // owner: -1 the hero's own chain, -2 none
@@ -5659,7 +5659,8 @@ struct ComboRun {
     NpcCombo::Hop queued;ULONGLONG queued_at=0,queued_ready=0;bool hold=false; // queued.move<0: no press waiting; hold: after the playing move; queued_ready: a pause row's press, not before then
     uint64_t visit=0; // changes even when a loop re-enters the same node
     ComboPlayback::NodeClock path_clock,step_clock,restart_clock; // restart waits without changing the live cursor
-    ULONGLONG ended_at=0; // when the last move ended (the wait for the next press counts from there)
+    bool path_expired=false; // this visit no longer accepts continuation; its move may still finish naturally
+    ULONGLONG ended_at=0; // actual move end, independent of the continuation window
     int32_t home=-2; // the look the chain ends in, set by a 变身 / 变回主角 node (-1 the hero's own; -2 none: the owner's)
     ULONGLONG at=0,started=0,last_press=0,reset_at=0,rate_check=0,cut_at=0; // cut_at: when the move before could be cut (0: not yet)
     Object* before=nullptr;Object* rated=nullptr;Identity rated_anim;bool first_rated=false;  // rated_anim: the anim instance the rated montage was on
@@ -6541,6 +6542,7 @@ void ResetCombo(const char* why,const std::wstring& note) {
     combo_.native=false;
     if(combo_.trigger>=0&&combo_.cursor>=0)Logf("NPC_COMBO reset reason=%s trigger=%d node=%d",why,combo_.trigger,combo_.cursor);
     combo_.trigger=-1;combo_.cursor=-1;combo_.playing=-1;combo_.queued={};combo_.queued_ready=0;combo_.hold=false;combo_.phase=ComboRun::Phase::Idle;combo_.reset_at=0;combo_.cut_at=0;
+    combo_.path_expired=false;
     ++combo_.visit;combo_.path_clock.Reset();combo_.step_clock.Reset();combo_.restart_clock.Reset();
     combo_.last_press=0;combo_.ended_at=0;combo_.home=-2;combo_.row_branch=-1;combo_.row_row=-1;
     PublishCombo(note);
@@ -6649,7 +6651,7 @@ void PlayNode(int index,int button,ULONGLONG now) {
         combo_.queued={};combo_.queued_ready=0;combo_.hold=false;combo_.restart_clock.Reset();
     }
     if(TeleportBusy()&&tp_.node!=index)EndTeleport("next-node");
-    ++combo_.visit;combo_.reset_at=0;combo_.ended_at=0;combo_.step_clock.Reset();
+    ++combo_.visit;combo_.path_expired=false;combo_.reset_at=0;combo_.ended_at=0;combo_.step_clock.Reset();
     const int group_cut=step?NpcCombo::CancelOf(combo_.config,group_.index):0;
     const bool group_open=step&&(NpcCombo::InterruptFor(combo_.config,combo_.trigger,group_.index)||
         (group_cut>0&&now>=group_.started+static_cast<ULONGLONG>(group_cut)));
@@ -6889,6 +6891,29 @@ void ReachComboPath(ULONGLONG now){
     }else if(combo_.phase!=ComboRun::Phase::Starting&&MoveCut(now))combo_.path_clock.Reach(now);
 }
 int BranchPrefix(){return NpcCombo::SharedWait(combo_.config,combo_.cursor);}
+// Do not reset the live move at expiry: ResetCombo returns its borrowed look,
+// weapon and modifiers. Only a later valid start commits that cleanup.
+bool ContinuationHoldPending(ULONGLONG deadline);
+bool WindowRestartSafe(ULONGLONG now){
+    if(charge_pause_.active||TeleportBusy()||HookAnchorBusy()||combo_.phase==ComboRun::Phase::Starting)return false;
+    if(group_.index>=0&&group_.step+1<group_.steps.size())return false;
+    if(ChainGrabActive()||PlayingGrab()){const auto s=MotianGrab::GetSnapshot();if(s.active||s.cleanup_pending)return false;}
+    return MoveCut(now);
+}
+void RefreshComboWindow(ULONGLONG now){
+    if(combo_.path_expired||combo_.trigger<0||combo_.native||combo_.hold||combo_.queued.move>=0)return;
+    // KeepChain deliberately retains its old end/native-action based lease.
+    // Unwired tails retain the strict completion rule for implicit looping.
+    if(KeepChainMs()>0||!NpcCombo::Continues(combo_.config,combo_.cursor))return;
+    ReachComboPath(now);
+    if(!combo_.path_clock.open)return;
+    const ULONGLONG deadline=combo_.path_clock.GateDeadline(combo_.reset_ms,BranchPrefix(),NpcCombo::MaxPause(combo_.config,combo_.cursor),NpcCombo::kPauseGraceMs);
+    if(now<=deadline||ContinuationHoldPending(deadline)||!WindowRestartSafe(now))return;
+    combo_.path_expired=true;
+    Logf("NPC_COMBO continuation window expired trigger=%d node=%d gate=%llu deadline=%llu now=%llu resetMs=%d (move may finish naturally)",
+         combo_.trigger,combo_.cursor,combo_.path_clock.reached,deadline,now,combo_.reset_ms);
+    PublishCombo(L"派生窗口已过期：下次起手从第一招开始，当前动作自然收招");
+}
 ULONGLONG QueuedPathDue(){
     if(combo_.hold)return combo_.restart_clock.Due(combo_.queued_at,combo_.queued.wait_ms,NpcCombo::SharedWait(combo_.config,combo_.trigger),combo_.queued.pause_ms,combo_.queued.branch>=0);
     return combo_.path_clock.Due(combo_.queued_at,combo_.queued.wait_ms,BranchPrefix(),combo_.queued.pause_ms,combo_.queued.branch>=0);
@@ -6974,7 +6999,8 @@ ComboPress WhereTo(const NpcCombo::Press& given,ULONGLONG now) {
     ComboPress out;const NpcCombo::Press press=WithWeapon(given);out.input=press;
     const bool action_row=press.branch>=0&&static_cast<size_t>(press.branch)<combo_.config.chain.size()&&combo_.config.chain[static_cast<size_t>(press.branch)].type==NpcCombo::NodeType::WeaponActions;
     if(action_row&&NpcCombo::WeaponActionsRow(combo_.config.chain[static_cast<size_t>(press.branch)],press,press.branch)<0)return out;
-    if(combo_.cursor>=0&&combo_.trigger>=0&&(!action_row||press.branch==combo_.trigger)&&(press.combo<0||press.combo==combo_.trigger)){  // a 组合键 goes on with its own chain only
+    RefreshComboWindow(now);
+    if(!combo_.path_expired&&combo_.cursor>=0&&combo_.trigger>=0&&(!action_row||press.branch==combo_.trigger)&&(press.combo<0||press.combo==combo_.trigger)){  // a 组合键 goes on with its own chain only
         const bool moving=combo_.phase!=ComboRun::Phase::Idle&&!NpcCombo::IsTrigger(combo_.config,combo_.cursor);
         if(moving&&!combo_.cut_at&&MoveCut(now))combo_.cut_at=now;
         ReachComboPath(now);out.since=combo_.path_clock.Elapsed(now,BranchPrefix());
@@ -6983,7 +7009,7 @@ ComboPress WhereTo(const NpcCombo::Press& given,ULONGLONG now) {
     }
     // 保持派生: while the chain goes on from here no press starts a chain (another trigger, this one again): it is left
     // to the game and the chain stays.
-    if(KeepChainMs()>0){out.hop={};out.kept=combo_.queued.move>=0;return out;}
+    if(!combo_.path_expired&&KeepChainMs()>0){out.hop={};out.kept=combo_.queued.move>=0;return out;}
     const int trigger=NpcCombo::TriggerFor(combo_.config,press);
     if(trigger>=0){
         const int button=NpcCombo::StartButton(combo_.config,trigger,press);
@@ -7009,7 +7035,8 @@ std::vector<KeyWatch> KeyWatches(bool raw){
     for(size_t i=0;i<c.chain.size();++i){const auto& n=c.chain[i];if(n.type!=NpcCombo::NodeType::WeaponActions||!n.on||(n.air_set?!airborne:n.weapon.empty()||n.weapon!=weapon))continue;
         for(size_t r=0;r<n.routes.size();++r){const auto& route=n.routes[r];if(route.next<0||!NpcCombo::KeysRouteReady(route)||(route.button==static_cast<int>(NpcCombo::Trigger::Keys))!=raw)continue;
             KeyWatch w;w.branch=static_cast<int>(i);w.row=static_cast<int>(r);w.keys=route.keys;w.chord=route.chord;w.window=route.window;w.swallow=route.swallow;w.hold=NpcCombo::ClampHold(route.hold_ms);w.weapon_action=true;out.push_back(std::move(w));}}
-    if(combo_.trigger<0||combo_.cursor<0)return out;
+    RefreshComboWindow(GetTickCount64());
+    if(combo_.path_expired||combo_.trigger<0||combo_.cursor<0)return out;
     const int count=static_cast<int>(c.chain.size());
     const auto row=[&](int b,int r){
         if(b<0||b>=count||c.chain[static_cast<size_t>(b)].type!=NpcCombo::NodeType::Branch||r<0||r>=static_cast<int>(c.chain[static_cast<size_t>(b)].routes.size()))return;
@@ -7128,7 +7155,8 @@ bool PressComboImpl(const NpcCombo::Press& press,const char* source) {
     }
     if(where.trigger<0){Queue(where,now,source,false);return true;}
     const NpcCombo::Node& node=combo_.config.chain[static_cast<size_t>(where.trigger)];
-    const bool again=where.trigger==combo_.trigger&&combo_.phase!=ComboRun::Phase::Idle;
+    const bool window_restart=combo_.path_expired&&WindowRestartSafe(now);
+    const bool again=where.trigger==combo_.trigger&&combo_.phase!=ComboRun::Phase::Idle&&!window_restart;
     if(again){
         Logf("NPC_COMBO restart queued trigger=%d from=%d playing=%d source=%s: waits for completion",combo_.trigger,combo_.cursor,combo_.playing,source);
         Queue(where,now,source,true);return true; // preserve the live cursor, visit and timers while buffering
@@ -7657,6 +7685,7 @@ void DriveCombo() {
     if(combo_.phase==P::Running&&!combo_.cut_at&&MoveCut(now))combo_.cut_at=now;
     ReachComboPath(now);
     if(PreInputExpired(now))ClearPreInput(now);
+    RefreshComboWindow(now);
     const bool ready=QueuedReady(now);
     if(ready){PlayHop(combo_.queued,now);return;}
     if(combo_.phase==P::Running&&StepDone(now)){AdvanceGroup(now);return;}
@@ -7695,7 +7724,7 @@ void DriveCombo() {
         combo_.ended_at=now;
         const int pause=NpcCombo::MaxPause(combo_.config,combo_.cursor),keep=KeepChainMs();
         combo_.path_clock.Reach(now);
-        combo_.reset_at=combo_.path_clock.Deadline(now,keep>0?keep:combo_.reset_ms,BranchPrefix(),pause,NpcCombo::kPauseGraceMs);
+        combo_.reset_at=combo_.path_expired?now:combo_.path_clock.Deadline(now,keep>0?keep:combo_.reset_ms,BranchPrefix(),pause,NpcCombo::kPauseGraceMs);
         if(NpcCombo::Continues(combo_.config,combo_.cursor)&&combo_.queued.move<0)
             Logf("NPC_COMBO node=%d ended: the next press is taken for %dms (%s %dms; longest pause %dms; branch elapsed %dms)",ended,
                  static_cast<int>(combo_.reset_at-now),keep>0?"保持派生":"reset",keep>0?keep:combo_.reset_ms,pause,combo_.path_clock.Elapsed(now,BranchPrefix()));
@@ -7717,7 +7746,11 @@ void DriveCombo() {
         Context context;
         if(ContextNow(context)&&context.pawn==ChainPawn().object&&ActiveMontage(context))combo_.reset_at=(std::max)(combo_.reset_at,now+kWeaponNativeIdleMs);
     }
-    if(combo_.queued.move<0&&combo_.reset_at&&now>combo_.reset_at){
+    // A hold begun inside the continuation window is an input in flight,
+    // including when the animation naturally ends before its threshold.
+    const ULONGLONG hold_deadline=KeepChainMs()<=0&&NpcCombo::Continues(combo_.config,combo_.cursor)&&combo_.path_clock.open?
+        combo_.path_clock.GateDeadline(combo_.reset_ms,BranchPrefix(),NpcCombo::MaxPause(combo_.config,combo_.cursor),NpcCombo::kPauseGraceMs):combo_.reset_at;
+    if(combo_.queued.move<0&&combo_.reset_at&&now>combo_.reset_at&&!ContinuationHoldPending(hold_deadline)){
         Logf("NPC_COMBO trigger=%d reset: no press within %dms of the move's end (last press %dms ago, reset %dms, 保持派生 %dms, longest pause %dms)",combo_.trigger,
              combo_.ended_at?static_cast<int>(combo_.reset_at-combo_.ended_at):-1,SinceLastPress(now),combo_.reset_ms,KeepChainMs(),NpcCombo::MaxPause(combo_.config,combo_.cursor));
         ResetCombo("timeout",L"派生链重置：下次按键从第一招开始");
@@ -7900,6 +7933,55 @@ enum class HoldKind { Hero, NpcKey, Raw, Combo };
 struct HoldWait { bool on=false;HoldKind kind=HoldKind::Hero;NpcCombo::Press press;std::string source;ULONGLONG down=0;int need=0;bool tap_takes=false;unsigned bits=0;
     std::vector<KeyWatch> watches;Identity pawn;ComboPlayback::HoldScope scope; };
 HoldWait hold_;
+// EndHold moves hold_ out before dispatching. Keep that one press visible to
+// the derivation-window check until its tap/hold decision has been submitted.
+const HoldWait* hold_dispatch_=nullptr;
+int hold_dispatch_held_=0;
+struct HoldDispatchScope {
+    const HoldWait* before=nullptr;int before_held=0;
+    HoldDispatchScope(const HoldWait& wait,int held):before(hold_dispatch_),before_held(hold_dispatch_held_){hold_dispatch_=&wait;hold_dispatch_held_=held;}
+    ~HoldDispatchScope(){hold_dispatch_=before;hold_dispatch_held_=before_held;}
+    HoldDispatchScope(const HoldDispatchScope&)=delete;
+    HoldDispatchScope& operator=(const HoldDispatchScope&)=delete;
+};
+bool ContinuationHoldPending(ULONGLONG deadline){
+    const ULONGLONG now=GetTickCount64();
+    const auto continues=[&](const HoldWait& wait,bool dispatch){
+        if(!wait.on||wait.down>deadline||!Same(wait.pawn)||wait.pawn.object!=ChainPawn().object||
+           !wait.scope.Matches(combo_.owner,combo_.generation,combo_.visit)||combo_.trigger<0||combo_.cursor<0)return false;
+        // A pending long hold can still reach its threshold; dispatch protects
+        // only the actual tap/hold selected on release, never a hypothetical one.
+        const int held=dispatch?hold_dispatch_held_:NpcCombo::kHoldMax;
+        const auto reaches=[&](NpcCombo::Press press){
+            press.hold_ms=held;
+            if((press.combo>=0&&press.combo!=combo_.trigger))return false;
+            const bool action_row=press.branch>=0&&static_cast<size_t>(press.branch)<combo_.config.chain.size()&&
+                combo_.config.chain[static_cast<size_t>(press.branch)].type==NpcCombo::NodeType::WeaponActions;
+            if(action_row&&(press.branch!=combo_.trigger||NpcCombo::WeaponActionsRow(combo_.config.chain[static_cast<size_t>(press.branch)],press,press.branch)<0))return false;
+            return NpcCombo::Decide(combo_.config,combo_.cursor,combo_.button,press,
+                                    combo_.path_clock.Elapsed(now,BranchPrefix())).hop.move>=0;
+        };
+        if(wait.kind!=HoldKind::Raw&&wait.kind!=HoldKind::Combo)return reaches(wait.press);
+        const auto watch_reaches=[&](const KeyWatch& w){
+            NpcCombo::Press press;
+            if(w.then)press.then=true;
+            else{
+                press.bits=1u<<static_cast<int>(wait.kind==HoldKind::Raw?NpcCombo::Trigger::Keys:NpcCombo::Trigger::Combo);
+                if(w.trigger>=0)press.combo=w.trigger;
+                else{press.branch=w.branch;press.row=w.row;}
+            }
+            return reaches(press);
+        };
+        if(dispatch){
+            const KeyWatch* pick=nullptr;
+            for(const KeyWatch& w:wait.watches)if(w.hold<=held&&(!pick||w.hold>pick->hold))pick=&w;
+            return pick&&watch_reaches(*pick);
+        }
+        for(const KeyWatch& w:wait.watches)if(watch_reaches(w))return true;
+        return false;
+    };
+    return continues(hold_,false)||(hold_dispatch_&&continues(*hold_dispatch_,true));
+}
 std::atomic<ULONGLONG> test_hold_until_{0};  // npcretarget press <bits> hold <ms> / skill hold <ms>: the button counts as held until then
 struct HeldInput { Object* pawn=nullptr;Object* sinput=nullptr;std::vector<Object*> actions;std::vector<unsigned> bits;ULONGLONG refresh=0; };
 HeldInput held_input_;
@@ -8029,6 +8111,7 @@ void EndHold(const char* why,ULONGLONG now){
     const int held=static_cast<int>((std::min<ULONGLONG>)(now-wait.down,static_cast<ULONGLONG>(NpcCombo::kHoldMax)));
     if(!ComboReady()||!Same(wait.pawn)||wait.pawn.object!=ChainPawn().object||!wait.scope.Matches(combo_.owner,combo_.generation,combo_.visit)){
         Logf("NPC_COMBO hold dropped source=%s after %dms (%s): the chain's pawn, set or node visit changed",wait.source.c_str(),held,why);return;}
+    const HoldDispatchScope dispatch(wait,held);
     if(wait.kind==HoldKind::Raw||wait.kind==HoldKind::Combo){
         const KeyWatch* pick=nullptr;
         for(const KeyWatch& w:wait.watches)if(w.hold<=held&&(!pick||w.hold>pick->hold))pick=&w;

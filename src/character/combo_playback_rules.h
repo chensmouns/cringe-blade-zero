@@ -33,6 +33,16 @@ struct NodeClock {
         const uint64_t path=Arrival(prefix)+delay+window,finish=ended+static_cast<uint64_t>(reset);
         return path>finish?path:finish;
     }
+    // A continuation window starts at the derivation gate, NOT the end of
+    // its animation. Explicit intervals and branch pauses still own their time.
+    uint64_t GateDeadline(int reset,int prefix,int pause,int grace)const{
+        if(!open)return UINT64_MAX;
+        const uint64_t window=static_cast<uint64_t>(pause>0&&grace>reset?grace:reset);
+        return Arrival(prefix)+static_cast<uint64_t>(pause>0?pause:0)+window;
+    }
+    bool GateExpired(uint64_t now,int reset,int prefix,int pause,int grace)const{
+        return open&&now>GateDeadline(reset,prefix,pause,grace);
+    }
     bool BufferExpired(uint64_t now,uint64_t press,int keep,int total,int prefix,int pause,bool branch)const{
         if(keep<=0)return false;
         // 预输入 is one rule for every path: before the derivation gate a press

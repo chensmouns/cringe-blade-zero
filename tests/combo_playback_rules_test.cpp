@@ -75,6 +75,32 @@ int main() {
         }
     }
     {
+        // A 11.63 s move yields at 6.5 s: the 300 ms continuation window
+        // closes at 6.8 s, independently of the remaining recovery animation.
+        ComboPlayback::NodeClock gate;
+        check(!gate.GateExpired(20000,300,0,0,1500),"loading cannot expire a continuation window");
+        gate.Reach(6500);
+        check(gate.GateDeadline(300,0,0,1500)==6800,"continuation deadline uses gate, not animation end");
+        check(!gate.GateExpired(6800,300,0,0,1500)&&gate.GateExpired(6801,300,0,0,1500),"gate deadline is inclusive");
+        gate.Reach(11630);
+        check(gate.GateExpired(11630,300,0,0,1500),"natural end cannot reopen the gate window");
+        check(gate.GateDeadline(300,2000,0,1500)==8800,"explicit interval is not consumed by reset wait");
+        check(gate.GateDeadline(300,500,2000,1500)==10500,"pause branch keeps its pause and 1500 ms grace");
+        check(gate.GateDeadline(3000,500,2000,1500)==12000,"longer configured window wins over pause grace");
+        // The runtime latches expiration only without accepted queued input or
+        // a qualifying same-visit hold; it leaves the live move untouched.
+        NpcCombo::Config c;c.chain.push_back(NpcCombo::TriggerNode(NpcCombo::Trigger::Heavy,0,0));
+        c.chain.push_back({NpcCombo::NodeType::Skill,"GA_First"});c.chain.push_back({NpcCombo::NodeType::Skill,"GA_Second"});
+        c.chain[0].next=1;c.chain[1].next=2;
+        NpcCombo::Press press;const int heavy=static_cast<int>(NpcCombo::Trigger::Heavy);press.bits=1u<<heavy;
+        check(NpcCombo::Decide(c,1,heavy,press,299).hop.move==2,"before expiry the press continues to the second move");
+        const int trigger=NpcCombo::TriggerFor(c,press);
+        check(trigger==0&&NpcCombo::Follow(c,trigger,NpcCombo::StartButton(c,trigger,press),press,-1).move==1,"after expiry routing through the start selects the first move");
+        check(!NpcCombo::Continues(c,2),"unwired tail is excluded from gate expiry and retains full completion");
+        gate.Reset();gate.Reach(20000);
+        check(!gate.GateExpired(6801,300,0,0,1500)&&gate.GateDeadline(300,0,0,1500)==20300,"new visit never inherits expired window");
+    }
+    {
         ComboPlayback::ChargePoints points;const std::vector<int> marks{100,500,900,1500,2000};
         check(!points.Step(marks,.499,.2,2,true),"trim skips markers before the kept range");
         check(points.Step(marks,.6,.2,2,true)&&points.at==.5,"speed overshoot catches first marker at its authored time");
