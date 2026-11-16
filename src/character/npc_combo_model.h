@@ -294,6 +294,7 @@ struct Node {
     // own bone lengths, the move's rotations) instead of taking the boss's look behind the blink. On a trigger or a
     // 武器派生修改 it is 整体不变身: every BOSS 技能 and 投技 of the chains it starts plays so (OwnLookFor).
     bool own_look = false;
+    int awakening_ms = 40000;  // MoTian SwitchPhase: buffs, blade FX and music share this lifetime.
     bool hook_self = false;  // 钩子: 勾过去 (the hero pulls itself to the target); false: 勾过来 (the target is pulled over)
     bool hook_auto = false;  // 钩子: 自动 (勾过来 a target whose guard is broken, else 勾过去); hook_self is what it plays as
     int hook_dist = 1500, hook_speed = 100;  // 钩子: the farthest aim it takes (cm) and its speed (percent): kHookDist*, kHookSpeed*
@@ -313,6 +314,8 @@ struct Node {
     std::vector<CurvePoint> points;
     BoneMotion::Config bones; // per-move visual edits; serialized as an unwired interval for old builds
 };
+inline bool AwakeningNode(const Node& n) { return n.type == NodeType::BossSkill && n.ability == "GA_MoTian_SwitchPhase"; }
+inline int ClampAwakening(int ms) { return std::clamp(ms, 1000, 600000); }
 // placed: false when the text had no places (saved before the canvas), so the page lays the nodes out once.
 struct Config { bool enabled = true; std::vector<Node> chain; bool placed = true; };
 // kMaxNodes: no limit a page reaches in use; only a guard against a broken or hostile file (memory, drawing time).
@@ -1933,6 +1936,8 @@ inline std::wstring Encode(const Config& config) {
             if (NamedRow(node, node.routes[r]) && AbilityName(node.routes[r].ability) && !KeysRoute(node.routes[r]))
                 text += "|n:" + std::to_string(i) + "," + std::to_string(r) + "," + node.routes[r].ability;
     }
+    for (size_t i=0;i<config.chain.size();++i) if(AwakeningNode(config.chain[i]))
+        text += "|m:"+std::to_string(i)+","+std::to_string(ClampAwakening(config.chain[i].awakening_ms));
     return std::wstring(text.begin(), text.end());
 }
 inline Config Decode(const std::wstring& wide) {
@@ -1943,6 +1948,7 @@ inline Config Decode(const std::wstring& wide) {
     std::vector<std::pair<int,BoneMotion::Config>> bone_marks;
     bool triggers = false, old_key = false, placed = true; int start = -1, start_x = 24, start_y = 24;
     std::vector<std::pair<int, int>> arrows;  // node -> modifier
+    std::vector<std::pair<int,int>> awakenings;
     std::vector<int> own_looks;  // 不变身 BOSS 技能 / 投技 nodes
     std::vector<int> hooks, auto_hooks;  // 钩子 nodes (written as 武器派生), and those that are 自动
     std::vector<int> air_sets;  // 空中派生 nodes (written as 武器派生修改)
@@ -1976,6 +1982,9 @@ inline Config Decode(const std::wstring& wide) {
             const size_t sep=part.find('~',2);
             if(sep!=std::string::npos&&sep>2&&std::isdigit(static_cast<unsigned char>(part[2]))&&bone_marks.size()<kMaxNodes)
                 bone_marks.emplace_back(std::atoi(part.substr(2,sep-2).c_str()),BoneMotion::Decode(part.substr(sep+1)));
+        } else if (part[0] == 'm') {
+            const auto f=Split(part.substr(2), ',');
+            if(f.size()==2 && awakenings.size()<kMaxNodes) awakenings.emplace_back(std::atoi(f[0].c_str()),ClampAwakening(std::atoi(f[1].c_str())));
         } else if (part[0] == 'h') {
             const std::string f = part.substr(2);
             if (!f.empty() && std::isdigit(static_cast<unsigned char>(f[0]))) own_looks.push_back(std::atoi(f.c_str()));
@@ -2326,6 +2335,8 @@ inline Config Decode(const std::wstring& wide) {
     for (const ReachMark& r : reaches)
         if (r.node >= 0 && r.node < count && config.chain[static_cast<size_t>(r.node)].type == NodeType::Hook) {
             config.chain[static_cast<size_t>(r.node)].hook_dist = r.dist; config.chain[static_cast<size_t>(r.node)].hook_speed = r.speed; }
+    for(const auto& a:awakenings) if(a.first>=0 && a.first<count && AwakeningNode(config.chain[static_cast<size_t>(a.first)]))
+        config.chain[static_cast<size_t>(a.first)].awakening_ms=a.second;
     for (const HoldMark& h : holds) {
         if (h.node < 0 || h.node >= count) continue;
         Node& node = config.chain[static_cast<size_t>(h.node)];

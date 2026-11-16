@@ -64,3 +64,6 @@ combos/
 !src/third_party/lua/LICENSE
 !licenses/Lua-LICENSE.txt
 !sdk/samples/lua/*.lua
+
+# Custom SwitchPhase lifetime implementation.
+!src/character/phase_awakening.inl

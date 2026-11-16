@@ -198,6 +198,8 @@ target_link_options(game_pad_gate_test PRIVATE /DELAYLOAD:XINPUT1_4.dll)
 # 招式派生 model: move kinds, chain plan / slow-down rate, hero dodge families, ini text.
 add_executable(npc_combo_test tests/npc_combo_test.cpp)
 pbz_settings(npc_combo_test)
+add_executable(phase_awakening_test tests/phase_awakening_test.cpp)
+pbz_settings(phase_awakening_test)
 
 # 招式派生 page rendered offline from the generated skill / dodge tables (stubbed game state) to a PNG.
 add_executable(combo_menu_preview tests/combo_menu_preview.cpp src/character/combo_menu.cpp src/character/speed_curve_window.cpp src/character/bone_motion_page.cpp src/character/npc_combo.cpp src/character/combo_file.cpp ${PBZ_PLUGIN_HOST_SOURCES}

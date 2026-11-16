@@ -346,7 +346,9 @@ size_t RandomCount(const NpcSkillSet& set){return set.random_count&&set.random_c
 // the press move on to the round's next skill (at most kSkillTriesPerPress skills per press).
 // exact: a chosen skill (npcretarget cast, the audit); once it gives up waiting no other skill is tried.
 // note: a chain step / dodge replacement names itself in the notice instead of the round count.
-struct PendingCast { Identity asc,ability_class;int32_t handle=0;size_t pick=0,tries=0;ULONGLONG since=0,until=0,next_try=0,load_ms=0;std::string name;std::wstring note;bool pinned=false,exact=false,owned=false,bare=false; };  // owned: the hero's own spec; bare: a boss move granted to the hero without an NPC look (不变身)
+int awakening_duration_request_=40000;
+struct PendingCast {
+    int awakening_ms=40000; Identity asc,ability_class;int32_t handle=0;size_t pick=0,tries=0;ULONGLONG since=0,until=0,next_try=0,load_ms=0;std::string name;std::wstring note;bool pinned=false,exact=false,owned=false,bare=false; };  // owned: the hero's own spec; bare: a boss move granted to the hero without an NPC look (不变身)
 PendingCast pending_;
 // BOSS 技能 (NpcCombo::NodeType::BossSkill): the hero takes another look for moves of the chain. owner: the look the
 // chain belongs to (-1: the hero's own); row: the look asked for. Going: waiting for that look, then the node's move
@@ -3879,7 +3881,7 @@ bool GrantPackage(Object* asc,const std::string& package,size_t pick,size_t trie
     Call give(asc,"K2_GiveAbility");
     if(!give.Set("AbilityClass",cls).Set("Level",int32_t{0}).Set("InputID",int32_t{-1}).Invoke()||give.Get<int32_t>("ReturnValue")<=0){
         Logf("NPC_SKILL grant failed ability=%s asc=%s",name.c_str(),Text(asc).c_str());return false;}
-    pending_={};pending_.asc=Id(asc);pending_.ability_class=Id(cls);pending_.handle=give.Get<int32_t>("ReturnValue");pending_.pick=pick;pending_.tries=tries;
+    pending_={};pending_.awakening_ms=awakening_duration_request_;pending_.asc=Id(asc);pending_.ability_class=Id(cls);pending_.handle=give.Get<int32_t>("ReturnValue");pending_.pick=pick;pending_.tries=tries;
     pending_.since=GetTickCount64();pending_.until=pending_.since+kSkillWaitMs;pending_.next_try=pending_.since+kSkillRetryMs;pending_.load_ms=load_ms;pending_.name=name;pending_.pinned=pinned;
     return true;
 }
@@ -3898,6 +3900,7 @@ void DropPendingSkill(const char* why) {
 // for it (that lock made the game hook an enemy past the node's reach, 11-09).
 bool hook_no_lock_=false;std::string hook_no_lock_name_;
 // One activation attempt of pending_, locked on the nearest enemy first. true: it started and is skill_ now.
+#include "phase_awakening.inl"
 bool TryPendingSkill(const Context& context) {
     const bool no_lock=hook_no_lock_&&pending_.name==hook_no_lock_name_;if(no_lock)hook_no_lock_=false;
     const char* lock=no_lock?"none (the hook's aim took no enemy)":LockNearestEnemy(context.pawn);
@@ -3906,6 +3909,9 @@ bool TryPendingSkill(const Context& context) {
     const bool boss=!pending_.owned;
     if(boss&&skill_.handle>0)return false;
     Object* asc=pending_.asc.object;
+    const bool phase=pending_.name=="GA_MoTian_SwitchPhase";
+    Object* music=phase?AwakeningMusic(context.pawn):nullptr;
+    const int32_t before_music=ue::Alive(music)?Property<int32_t>(music,"CurPlayingID_Gameplay"):0;
     if(!NpcSkillSupport::ActivateWithSupport(boss,[&]{
         RemoveSkillWeapons("prepare-next-cast");
         if(pending_.bare&&!active_)ShowBareWeapons(context,pending_.name);
@@ -3928,6 +3934,7 @@ bool TryPendingSkill(const Context& context) {
     // The spec leaves the ASC when the ability ends (GAS RemoveAfterActivation); WatchSkill only observes.
     const bool remove_on_end=!pending_.owned&&Call(asc,"SetRemoveAbilityOnEnd").Set("AbilitySpecHandle",pending_.handle).Invoke();
     const PendingCast cast=pending_;pending_={};
+    if(phase)StartAwakening(context,asc,cast.awakening_ms,before_music);
     charge_pause_.Reset();skill_={};skill_.asc=cast.asc;skill_.ability_class=cast.ability_class;skill_.handle=cast.handle;skill_.started=GetTickCount64();skill_.name=cast.name;skill_.owned=cast.owned;skill_.bare=cast.bare&&!active_;
     RememberSkillLock(context.pawn);
     if(boss){skill_route_until_.store(~0ull,std::memory_order_relaxed);NoExecutionOn(context.pawn);}
@@ -6655,6 +6662,7 @@ void PlayNode(int index,int button,ULONGLONG now) {
 void PlayNodeImpl(int index,int button,ULONGLONG now) {
     const NpcCombo::Node* node=ComboNode(index);
     if(!node||!NpcCombo::IsMove(*node)){ResetCombo("no-move",L"派生链停止：这一招不属于当前外观");return;}
+    awakening_duration_request_=NpcCombo::AwakeningNode(*node)?NpcCombo::ClampAwakening(node->awakening_ms):40000;
     Context context;
     if(!ContextNow(context)||context.pawn!=ChainPawn().object){ResetCombo("no-player",L"派生链停止：主角不可用");return;}
     combo_.native=false;
@@ -11839,6 +11847,7 @@ void DrivePlugins(){
 
 void Tick() {
     if (!initialized_) return;
+    DriveAwakening();
     ChainFrame chain_frame;
     Timed(kPartPool,[]{HoldPoolDormancy();});
     const LONGLONG display_t0 = QpcNow();
@@ -12175,7 +12184,7 @@ BoneMotion::Config BoneEdits(){
 void OnGameThreadGuarded() { GuardedTick(); }
 bool BeforeTravel() {
     AcquireSRWLockExclusive(&request_lock); pending_action_ = -1; ReleaseSRWLockExclusive(&request_lock);
-    __try { KeepForNextScene("travel"); waiting_action_ = -1; const bool restored=Restore();return PoolClear()&&restored; }
+    __try { EndAwakening("travel"); KeepForNextScene("travel"); waiting_action_ = -1; const bool restored=Restore();return PoolClear()&&restored; }
     __except (FaultFilter(GetExceptionInformation())) { Logf("NPC_RETARGET pre-travel cleanup fault 0x%08lx", fault_code_); return false; }
 }
 bool ReleaseForExternal() {

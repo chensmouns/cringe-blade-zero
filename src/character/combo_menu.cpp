@@ -1208,7 +1208,7 @@ SIZE MeasureNodeBody(HDC dc,size_t index) {
     if (node.type==NodeType::BossSkill) {
         const int look=Units(dc,UiTheme::Font::Body,(node.boss.empty()?Tr(L"选择外观"):BossLookName(node.boss))+L"  ▾")+60;
         const int move=Units(dc,UiTheme::Font::Body,(node.ability.empty()?Tr(L"选择招式"):MoveText(node.ability))+L"  ▾")+60;
-        return {std::clamp((std::max)((std::max)(title,look),move),280,420),kHeader+kRow*4+kPad};  // + 不变身
+        return {std::clamp((std::max)((std::max)(title,look),move),280,420),kHeader+kRow*(NpcCombo::AwakeningNode(node)?5:4)+kPad};  // + 不变身 / 限时觉醒
     }
     if (node.type==NodeType::Assist) {  // its look, its move, a note
         const int look=Units(dc,UiTheme::Font::Body,(node.boss.empty()?Tr(L"选择外观"):BossLookName(node.boss))+L"  ▾")+60;
@@ -1338,6 +1338,12 @@ Shape NodeShape(HDC dc,size_t index) {
         s.field=Row(s.rect,0,26); s.field2=Row(s.rect,1,26);
         stepper(2);  // its 派生点
         s.toggle=Row(s.rect,3);  // 不变身
+        if(NpcCombo::AwakeningNode(node)){
+            const RECT line=Row(s.rect,4);const int b=line.bottom-line.top;
+            s.hplus={line.right-b,line.top,line.right,line.bottom};
+            s.hvalue={s.hplus.left-Px(100),line.top,s.hplus.left-Px(4),line.bottom};
+            s.hminus={s.hvalue.left-Px(4)-b,line.top,s.hvalue.left-Px(4),line.bottom};s.has_hold=true;
+        }
     } else if (node.type==NodeType::Assist) {
         s.field=Row(s.rect,0,26); s.field2=Row(s.rect,1,26);  // its look, its move; then a note (no 派生点: the hero is free)
     } else if (node.type==NodeType::WeaponMove) {
@@ -1698,6 +1704,7 @@ void Nudge(int index,int dir,int route=-1) {
 int* HoldOf(int index,int row) {
     if (!At(index)) return nullptr;
     Node& node=config_.chain[static_cast<size_t>(index)];
+    if (row<0 && NpcCombo::AwakeningNode(node)) return &node.awakening_ms;
     if (row<0) return node.type==NodeType::Trigger?&node.hold_ms:node.type==NodeType::Trim?&node.trim_to:nullptr;  // a 裁剪's 结束于
     return NpcCombo::HasRows(node)&&static_cast<size_t>(row)<node.routes.size()?&node.routes[static_cast<size_t>(row)].hold_ms:nullptr;
 }
@@ -1717,7 +1724,8 @@ void NudgeHold(int index,int dir,int row) {
             if (clip>0&&to>=clip) to=0; else if (to<=from) to=from+NpcCombo::kTrimStep;
         }
         *hold=NpcCombo::ClampTrim(to);
-    } else *hold=NpcCombo::ClampHold(*hold+(dir>0?1:-1)*NpcCombo::kHoldStep);
+    } else if(NpcCombo::AwakeningNode(config_.chain[static_cast<size_t>(index)])) *hold=NpcCombo::ClampAwakening(*hold+(dir>0?1:-1)*1000);
+    else *hold=NpcCombo::ClampHold(*hold+(dir>0?1:-1)*NpcCombo::kHoldStep);
     Save(); Invalidate();
 }
 // A value typed in: a 加速's multiplier (×0.50–×10.00) or a move's 派生点 in seconds (0–10; 0: when it ends). A
@@ -1744,7 +1752,7 @@ void BeginHoldEdit(int index,int row) {
     const int* hold=HoldOf(index,row); if (!hold) return;
     wchar_t text[16]{};
     if (config_.chain[static_cast<size_t>(index)].type==NodeType::Trim) _snwprintf_s(text,_countof(text),_TRUNCATE,L"%.2f",NpcCombo::ClampTrim(*hold)/1000.0);  // 结束于
-    else _snwprintf_s(text,_countof(text),_TRUNCATE,L"%.1f",NpcCombo::ClampHold(*hold)/1000.0);
+    else _snwprintf_s(text,_countof(text),_TRUNCATE,L"%.1f",(NpcCombo::AwakeningNode(config_.chain[static_cast<size_t>(index)])?NpcCombo::ClampAwakening(*hold):NpcCombo::ClampHold(*hold))/1000.0);
     edit_={index,text,true,row}; SetFocus(window_); Invalidate();
 }
 void CancelEdit() { if (edit_.node>=0) { edit_={}; Invalidate(); } }
@@ -1755,10 +1763,11 @@ void CommitEdit() {
         int* hold=HoldOf(done.node,done.hold);
         wchar_t* end=nullptr; const double value=done.text.empty()?-1:std::wcstod(done.text.c_str(),&end);
         if (hold&&end&&end!=done.text.c_str()&&value>=0) {
-            const int ms=static_cast<int>(std::lround(value*1000));
+            const int ms=static_cast<int>(std::lround(std::clamp(value,0.0,600.0)*1000));
             const bool trim=config_.chain[static_cast<size_t>(done.node)].type==NodeType::Trim;  // a 裁剪's 结束于
-            *hold=trim?NpcCombo::ClampTrim(ms):NpcCombo::ClampHold(ms);
-            if (*hold!=ms) DebugHub::Notify(Tr(trim?L"裁剪时间在 0 到 60 秒之间，已调整。":L"按住时间在 0 到 5 秒之间，已调整。").c_str());
+            const bool awakening=NpcCombo::AwakeningNode(config_.chain[static_cast<size_t>(done.node)]);
+            *hold=awakening?NpcCombo::ClampAwakening(ms):trim?NpcCombo::ClampTrim(ms):NpcCombo::ClampHold(ms);
+            if (*hold!=ms) DebugHub::Notify(Tr(awakening?L"觉醒时间在 1 到 600 秒之间，已调整。":trim?L"裁剪时间在 0 到 60 秒之间，已调整。":L"按住时间在 0 到 5 秒之间，已调整。").c_str());
             Save();
         }
         Invalidate(); return;
@@ -4481,11 +4490,18 @@ void DrawCanvas(HDC dc,Gdiplus::Graphics& graphics) {
             field(s.field2,Part::NodeField2,node.ability.empty()?Tr(L"选择招式"):MoveText(node.ability),!node.ability.empty());
             RECT label=Row(s.rect,2); label.right=s.minus.left-Px(6);
             Label(dc,Tr(L"多久后可接下一招"),label,Scaled(UiTheme::Font::Small),muted,DT_SINGLELINE|DT_VCENTER|DT_LEFT|DT_END_ELLIPSIS);
-            const bool editing=edit_.node==index,caret=(GetTickCount64()/530)%2==0;
+            const bool editing=edit_.node==index&&edit_.hold==-2,caret=(GetTickCount64()/530)%2==0;
             const int cancel=NpcCombo::ClampCancel(node.ms);
             Stepper(dc,graphics,s,index,editing?edit_.text+(caret?L"▏":L" ")+L" s":cancel?Seconds(cancel/1000.0):Tr(L"放完"));
             if (editing) Rounded(graphics,s.value,static_cast<float>(Px(5)),0,0,accent,255,(std::max)(1.5f,2.f*Zoom()));
             CheckRow(dc,graphics,s.toggle,node.own_look||ChainOwnLook(i),hot_==Hit{Part::NodeToggle,index},OwnLookText(i));
+            if(NpcCombo::AwakeningNode(node)){
+                RECT r=Row(s.rect,4);r.right=s.hminus.left-Px(6);
+                Label(dc,Tr(L"觉醒时长"),r,Scaled(UiTheme::Font::Small),muted,DT_SINGLELINE|DT_VCENTER|DT_LEFT);
+                const bool edit=edit_.node==index&&edit_.hold==-1;
+                StepperAt(dc,graphics,s.hminus,s.hvalue,s.hplus,edit?edit_.text+(caret?L"▏":L" ")+L" s":Seconds(NpcCombo::ClampAwakening(node.awakening_ms)/1000.0),
+                    Hit{Part::NodeHoldMinus,index},Hit{Part::NodeHoldPlus,index},Hit{Part::NodeHoldValue,index});
+            }
             break;
         }
         case NodeType::Look: {

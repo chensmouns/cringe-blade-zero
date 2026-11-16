@@ -19,6 +19,12 @@ bool Near(double a, double b) { return std::fabs(a - b) < 1e-6; }
 
 int main() {
     using namespace NpcCombo;
+    { Config c; Node n; n.type=NodeType::BossSkill;n.boss="MoYuan";n.ability="GA_MoTian_SwitchPhase";c.chain.push_back(n);
+      auto d=Decode(Encode(c)); Check(d.chain[0].awakening_ms==40000,"awakening default survives serialization");
+      c.chain[0].awakening_ms=123000;d=Decode(Encode(c));Check(d.chain[0].awakening_ms==123000,"awakening custom duration survives serialization");
+      Check(ClampAwakening(-1)==1000&&ClampAwakening(900000)==600000,"awakening duration is bounded");
+      d=Decode(L"E1|X:MoYuan,GA_MoTian_SwitchPhase,0,0,-1|m:0,0");Check(d.chain[0].awakening_ms==1000,"awakening metadata clamps zero");
+      d=Decode(L"E1|X:MoYuan,GA_MoTian_Skill_04,0,0,-1|m:0,1000");Check(d.chain[0].awakening_ms==40000,"awakening metadata does not affect other skills"); }
     // Kinds.
     Check(Classify("GA_GreatBladeMan_LightAttack_01_ForCa") == Kind::Light, "LightAttack ... ForCa is a light attack");
     Check(Classify("/PBZCombatAsset/ActorData/Mobs/062_MuXiaoKui/Ability/Abilities/GA_MuXiaoKui_Skill_01") == Kind::Skill, "a package path classifies by its name");

@@ -163,6 +163,7 @@ int wmain(int argc,wchar_t** argv){
         shot(NpcCombo::kHudSimple,-1,-1,-1,0,L"ui_hud_simple_idle.png");
         shot(NpcCombo::kHudSimple,-1,-1,-1,0,L"ui_hud_empty.png",-1);            // a set with no chain
     }
+    {Node n=make(NodeType::BossSkill);n.boss="MoYuan";n.ability="GA_MoTian_SwitchPhase";n.awakening_ms=40000;render(n,"Awakening");}
     RECT after{};GetClipCursor(&after);const bool hidden=!IsWindowVisible(host_)&&!IsWindowVisible(page_)&&GetCapture()!=page_;
     manifest<<"],\"count\":"<<count<<",\"hidden\":"<<(hidden?"true":"false")<<",\"foreground_unchanged\":"<<(foreground==GetForegroundWindow()?"true":"false")<<"}";manifest.close();
     ComboMenu::Shutdown();DestroyWindow(host_);WeaponIcons::Shutdown();UiTheme::Shutdown();
