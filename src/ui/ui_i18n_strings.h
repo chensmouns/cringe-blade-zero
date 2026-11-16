@@ -7,6 +7,8 @@
 namespace UiI18n {
 struct UiTranslation { const wchar_t* zh; const wchar_t* en; };
 inline constexpr UiTranslation kUiTranslations[] = {
+    {L"觉醒时长", L"Awakening duration"},
+    {L"觉醒时间在 1 到 600 秒之间，已调整。", L"Awakening duration is limited to 1–600 seconds and has been adjusted."},
     {L"前招到派生点（未设则放完）后开始等待，不改变前招速度", L"Wait after the previous cut point (or its end); the previous move keeps its speed."},
     {L"复制", L"Copy"},
     {L"粘贴", L"Paste"},
