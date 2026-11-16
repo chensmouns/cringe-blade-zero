@@ -67,3 +67,8 @@ combos/
 
 # Custom SwitchPhase lifetime implementation.
 !src/character/phase_awakening.inl
+# Project licence (MIT) and the entry points for agents (AGENTS.md, CLAUDE.md imports it) and the architecture doc.
+!LICENSE
+!AGENTS.md
+!CLAUDE.md
+!docs/ARCHITECTURE.md
